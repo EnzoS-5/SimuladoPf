@@ -1,0 +1,91 @@
+name: Deploy AWS
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: deploy-simuladopf
+  cancel-in-progress: false
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+  deploy:
+    needs: tests
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: ${{ vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME }}/avaliacoes-api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+      - name: Copiar Compose para AWS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST_TEST }}
+          username: ${{ secrets.SSH_USER || 'ubuntu' }}
+          key: ${{ secrets.KEY_TEST }}
+          source: deploy/compose.yml
+          target: /home/ubuntu/simuladopf
+          strip_components: 1
+      - name: Atualizar API
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          IMAGE: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          AUTH0_ISSUER: ${{ vars.AUTH0_ISSUER || secrets.AUTH0_ISSUER }}
+          AUTH0_AUDIENCE: ${{ vars.AUTH0_AUDIENCE || secrets.AUTH0_AUDIENCE }}
+          FRONTEND_ORIGINS: ${{ vars.FRONTEND_ORIGINS || secrets.FRONTEND_ORIGINS }}
+          APP_PORT: ${{ vars.APP_PORT || '8082' }}
+        with:
+          host: ${{ secrets.HOST_TEST }}
+          username: ${{ secrets.SSH_USER || 'ubuntu' }}
+          key: ${{ secrets.KEY_TEST }}
+          envs: IMAGE,DB_NAME,DB_USER,DB_PASSWORD,AUTH0_ISSUER,AUTH0_AUDIENCE,FRONTEND_ORIGINS,APP_PORT
+          script: |
+            set -eu
+            cd /home/ubuntu/simuladopf
+            umask 077
+            : "${DB_NAME:?DB_NAME vazio}"
+            : "${DB_USER:?DB_USER vazio}"
+            : "${DB_PASSWORD:?DB_PASSWORD vazio}"
+            : "${AUTH0_ISSUER:?AUTH0_ISSUER vazio}"
+            : "${AUTH0_AUDIENCE:?AUTH0_AUDIENCE vazio}"
+            : "${FRONTEND_ORIGINS:?FRONTEND_ORIGINS vazio}"
+            # Arquivo privado; Compose recebe as variáveis exportadas pelo SSH.
+            # Dotenv privado preserva caracteres especiais sem imprimir valores.
+            export IMAGE DB_NAME DB_USER DB_PASSWORD AUTH0_ISSUER AUTH0_AUDIENCE FRONTEND_ORIGINS APP_PORT
+            python3 - <<'PYTHON'
+            import os
+            names = ['IMAGE', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'AUTH0_ISSUER', 'AUTH0_AUDIENCE', 'FRONTEND_ORIGINS', 'APP_PORT']
+            with open('.env', 'w') as file:
+                for name in names:
+                    # Aspas simples no dotenv mantêm $ literal; aspas internas são escapadas.
+                    value = os.environ[name].replace("\\", "\\\\").replace("'", "\\'")
+                    file.write(name + "='" + value + "'\n")
+            PYTHON
+            docker compose -p simuladopf -f compose.yml config --quiet
+            docker compose -p simuladopf -f compose.yml pull
+            docker compose -p simuladopf -f compose.yml up -d --wait --wait-timeout 120
+            ready=false
+            for attempt in $(seq 1 30); do
+              code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$APP_PORT/avaliacoes" || true)
+              if [ "$code" = 401 ]; then ready=true; break; fi
+              sleep 2
+            done
+            if [ "$ready" != true ]; then
+              docker compose -p simuladopf -f compose.yml logs --tail 80 api
+              exit 1
+            fi
+            docker compose -p simuladopf -f compose.yml ps

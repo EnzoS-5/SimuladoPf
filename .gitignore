@@ -31,3 +31,15 @@ build/
 
 ### VS Code ###
 .vscode/
+
+# Credenciais e artefatos locais
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+.test-runtime/

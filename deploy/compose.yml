@@ -1,0 +1,31 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:?defina DB_NAME}
+      POSTGRES_USER: ${DB_USER:?defina DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?defina DB_PASSWORD}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+  api:
+    image: ${IMAGE:?defina IMAGE}
+    restart: unless-stopped
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      AUTH0_ISSUER: ${AUTH0_ISSUER:?defina AUTH0_ISSUER}
+      AUTH0_AUDIENCE: ${AUTH0_AUDIENCE:?defina AUTH0_AUDIENCE}
+      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:?defina FRONTEND_ORIGINS}
+    ports: ["${APP_PORT:-8080}:8080"]
+volumes:
+  postgres-data:
